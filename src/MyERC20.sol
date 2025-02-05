@@ -9,21 +9,17 @@ contract MyERC20 is ERC20 {
     /**
      * @notice Constructor
      *
+     * @dev The initial supply is minted to the deployer
+     *
      * @param name_ The name of the token
      * @param symbol_ The symbol of the token
      * @param decimals_ The number of decimals used to get its user representation
+     * @param initialSupply The initial supply of the token
      */
-    constructor(string memory name_, string memory symbol_, uint8 decimals_) ERC20(name_, symbol_) {
+    constructor(string memory name_, string memory symbol_, uint8 decimals_, uint256 initialSupply)
+        ERC20(name_, symbol_)
+    {
         _decimals = decimals_;
-    }
-
-    /**
-     * @notice Mints `amount` tokens to `to`
-     *
-     * @param to The address to mint the tokens to
-     * @param amount The amount of tokens to mint
-     */
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
+        _mint(msg.sender, initialSupply);
     }
 }
