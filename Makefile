@@ -1,7 +1,7 @@
-.PHONY: prague fmt test approval unsafe safe
+.PHONY: anvil fmt test approval unsafe safe auth
 
 
-prague:
+anvil:
 	anvil --hardfork prague
 
 fmt:
@@ -12,6 +12,9 @@ test:
 
 approval:
 	forge test --mt Approval -vvvv
+
+auth:
+	forge test --mt Authorization -vvvv
 
 unsafe:
 	forge test --mt Unsafe -vvvv

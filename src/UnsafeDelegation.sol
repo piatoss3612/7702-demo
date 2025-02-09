@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-contract SimpleDelegate {
+contract UnsafeDelegation {
     event Executed(address indexed to, uint256 value, bytes data);
 
     struct Call {
         bytes data;
         address to;
         uint256 value;
+    }
+
+    function identifier() public pure virtual returns (bytes32) {
+        return keccak256("UnsafeDelegation");
     }
 
     function execute(Call[] memory calls) external payable virtual {
