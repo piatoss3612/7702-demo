@@ -145,72 +145,87 @@ contract SimpleDelegateTest is Test {
     }
 
     function test_SetAuthorization() public {
-        // ALICE가 승인 튜플을 생성
+        // ====================================================
+        // Step 1: Delegation Tuple 생성 및 부착
+        // ====================================================
+        // ALICE는 unsafe delegation 구현(contract)에 대해 delegation 서명을 생성합니다.
         Vm.SignedDelegation memory signedDelegation = vm.signDelegation(address(unsafeImplementation), ALICE_PVK);
-
-        // ALICE의 계정에 승인 튜플을 적용
+        // 생성된 delegation 서명을 ALICE의 계정에 부착합니다.
         vm.attachDelegation(signedDelegation);
 
         address alice = ALICE;
 
-        /**
-         * [읽기 작업 테스트]
+        // ====================================================
+        // Step 2: 읽기 작업(Read Operations) 검증
+        // ====================================================
+        /*
+         * EXTCODESIZE, EXTCODEHASH, EXTCODECOPY와 같은 읽기 작업을 수행할 경우,
+         * delegation이 적용된 계정(ALICE)은 delegation designator가 가리키는 컨트랙트(unsafeImplementation)의 코드를 반환해야 합니다.
          *
-         * 승인 튜플이 적용된 계정에 대한 EXTCODESIZE, EXTCODEHASH, EXTCODECOPY와 같은
-         * 읽기 작업은 delegation designator를 참조해야 한다.
+         * 아래 단계로 검증합니다:
+         *  - ALICE의 현재 코드와 unsafeImplementation의 코드를 각각 획득.
+         *  - 코드의 길이가 0보다 크고 두 코드의 길이가 동일함을 확인.
+         *  - 두 코드의 내용이 정확히 일치하는지 검증.
+         *  - extcodehash를 통해 얻은 해시값이 unsafeImplementation의 코드 해시(keccak256)와 일치하는지 확인.
+         *  - extcodecopy를 이용해 복사한 코드 또한 일치하는지 확인.
          */
-        bytes memory code = alice.code; // 승인 튜플이 적용된 ALICE의 코드
-        bytes memory expectedCode = abi.encodePacked(bytes3(0xef0100), address(unsafeImplementation)); // 접두사 0xef0100 및 구현체 주소를 abi.encodePacked 함수로 인코딩, delegation designator 구성
+        bytes memory code = alice.code; // ALICE에 부착된 delegation의 코드
+        bytes memory expectedCode = address(unsafeImplementation).code; // unsafeImplementation의 실제 코드
 
-        // 승인 튜플이 적용된 ALICE의 계정에는 delegation designator가 존재해야 함
-        assertGt(code.length, 0);
-        assertEq(code.length, expectedCode.length);
+        uint256 codeLength = code.length;
+        uint256 expectedCodeLength = expectedCode.length;
+
+        // delegation designator가 존재하는지 (코드가 존재하는지) 확인
+        assertGt(codeLength, 0);
+        // 코드 길이와 내용이 예상과 일치하는지 검증
+        assertEq(codeLength, expectedCodeLength);
         assertEq(code, expectedCode);
 
-        // 승인 튜플이 적용된 ALICE의 계정의 코드 해시는 delegation designator의 해시와 일치해야 함
+        // extcodehash를 이용해 코드 해시 비교
         bytes32 codeHash;
         assembly {
             codeHash := extcodehash(alice)
         }
         bytes32 expectedCodeHash = keccak256(expectedCode);
-
         assertEq(codeHash, expectedCodeHash);
 
-        // 승인 튜플이 적용된 ALICE의 계정의 코드를 복사
-        bytes memory copiedCode = new bytes(23);
+        // extcodecopy로 복사한 코드가 expectedCode와 일치하는지 확인
+        bytes memory copiedCode = new bytes(codeLength);
         assembly {
-            extcodecopy(alice, add(copiedCode, 0x20), 0, 23)
+            extcodecopy(alice, add(copiedCode, 0x20), 0, codeLength)
         }
-
-        // 복사된 코드는 delegation designator와 일치해야 함
         assertEq(copiedCode, expectedCode);
 
-        /**
-         * [실행 작업 테스트]
+        // ====================================================
+        // Step 3: 실행 작업(Execution Operations) 검증
+        // ====================================================
+        /*
+         * CALL, STATICCALL, DELEGATECALL, CALLCODE 등과 같은 실행 호출은 delegation designator가 가리키는
+         * 컨트랙트의 코드를 ALICE의 권한 컨텍스트에서 실행시켜야 합니다.
          *
-         * 승인 튜플이 적용된 계정에 대한 CALL, STATICCALL, DELEGATECALL, CALLCODE와 같은
-         * 실행 작업은 delegation designator가 가리키는 컨트랙트의 코드를 실행해야 한다.
-         * 실행 작업은 컨트랙트의 코드를 불러와 authority의 콘텍스트에서 실행되어야 한다.
+         * 아래 검증 단계가 있습니다:
+         * 1. STATICCALL을 이용해 unsafe delegation의 identifier 함수를 호출하고 반환 값을 확인.
+         * 2. 다른 계정(BOB)이 ALICE의 delegation을 통해 execute 호출을 실행했을 때,
+         *    실제로 ALICE의 컨텍스트에서 실행되어 잔액 변화가 발생하는지 점검.
          */
 
-        // 승인 튜플이 적용된 ALICE의 계정에 대한 STATICCALL을 통해 UnsafeDelegation 컨트랙트의 코드를 ALICE의 컨텍스트에서 실행
+        // (1) STATICCALL을 통해 identifier 호출: 반환값은 keccak256("UnsafeDelegation")이어야 함.
         (, bytes memory data) = ALICE.staticcall(abi.encodeWithSelector(UnsafeDelegation.identifier.selector));
         bytes32 identifier = abi.decode(data, (bytes32));
-
-        // 승인 튜플이 적용된 ALICE의 계정에 대한 STATICCALL을 통해 UnsafeDelegation 컨트랙트의 identifier는 keccak256("UnsafeDelegation")과 일치해야 한다.
         assertEq(identifier, keccak256("UnsafeDelegation"));
 
+        // (2) CALL 호출을 통한 execute 테스트:
+        // ALICE와 BOB의 초기 잔액 확인 (각 100 ether)
         uint256 aliceBalance = ALICE.balance;
         uint256 bobBalance = BOB.balance;
         assertEq(aliceBalance, 100 ether);
         assertEq(bobBalance, 100 ether);
 
+        // BOB의 컨텍스트로 ALICE의 execute 함수를 호출하여 1 ether 전송.
         vm.prank(BOB);
-
-        // 승인 튜플이 적용된 ALICE의 계정에 대한 CALL을 통해 UnsafeDelegation 컨트랙트의 execute 함수를 호출
         UnsafeDelegation(payable(ALICE)).execute{value: 1 ether}(new UnsafeDelegation.Call[](0));
 
-        // 컨트랙트 코드가 ALICE의 컨텍스트에서 실행되었으므로, ALICE의 잔액이 1 ether 증가해야 한다.
+        // 실행 후, ALICE의 잔액이 1 ether 증가하고 BOB의 잔액이 1 ether 감소했음을 확인.
         assertEq(ALICE.balance, aliceBalance + 1 ether);
         assertEq(BOB.balance, bobBalance - 1 ether);
     }
