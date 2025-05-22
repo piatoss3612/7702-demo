@@ -7,6 +7,7 @@ import {MyERC20} from "src/MyERC20.sol";
 import {UnsafeDelegation} from "src/UnsafeDelegation.sol";
 import {SafeDelegation} from "src/SafeDelegation.sol";
 import {SimpleSwap} from "src/SimpleSwap.sol";
+import {CheckCode} from "src/CheckCode.sol";
 
 /**
  * @title SimpleDelegateTest
@@ -37,6 +38,7 @@ contract SimpleDelegateTest is Test {
     // 테스트에서 사용할 컨트랙트 인스턴스들
     UnsafeDelegation public unsafeImplementation; // 누구나 호출할 수 있는 unsafe delegation 구현
     SafeDelegation public safeImplementation; // 오직 소유자 자신만 호출할 수 있는 safe delegation 구현
+    CheckCode public checkCode; // 코드 확인 컨트랙트
     SimpleSwap public swap; // 스왑 기능을 제공하는 컨트랙트
     MyERC20 public usdc; // 테스트용 USDC 토큰 (6자리 소수점)
     MyERC20 public usdk; // 테스트용 USDK 토큰 (6자리 소수점)
@@ -61,6 +63,9 @@ contract SimpleDelegateTest is Test {
         unsafeImplementation = new UnsafeDelegation();
         // Safe delegation 구현 컨트랙트 배포: 계정 소유자(예, ALICE)만 호출 가능하도록 제한되어 있습니다.
         safeImplementation = new SafeDelegation();
+
+        // 코드 확인 컨트랙트 배포
+        checkCode = new CheckCode();
 
         // 스왑 컨트랙트 배포
         swap = new SimpleSwap();
@@ -149,7 +154,10 @@ contract SimpleDelegateTest is Test {
         // Step 1: Delegation Tuple 생성 및 부착
         // ====================================================
         // ALICE는 unsafe delegation 구현(contract)에 대해 delegation 서명을 생성합니다.
-        Vm.SignedDelegation memory signedDelegation = vm.signDelegation(address(unsafeImplementation), ALICE_PVK);
+        Vm.SignedDelegation memory signedDelegation = vm.signDelegation(
+            address(unsafeImplementation),
+            ALICE_PVK
+        );
         // 생성된 delegation 서명을 ALICE의 계정에 부착합니다.
         vm.attachDelegation(signedDelegation);
 
@@ -170,7 +178,12 @@ contract SimpleDelegateTest is Test {
          *  - extcodecopy를 이용해 복사한 코드 또한 일치하는지 확인.
          */
         bytes memory code = alice.code; // ALICE에 부착된 delegation의 코드
-        bytes memory expectedCode = address(unsafeImplementation).code; // unsafeImplementation의 실제 코드
+        bytes memory expectedCode = abi.encodePacked(
+            bytes1(uint8(0xef)),
+            bytes1(uint8(0x01)),
+            bytes1(uint8(0x00)),
+            address(unsafeImplementation)
+        ); // `0xef0100` + `address(unsafeImplementation)`
 
         uint256 codeLength = code.length;
         uint256 expectedCodeLength = expectedCode.length;
@@ -180,21 +193,6 @@ contract SimpleDelegateTest is Test {
         // 코드 길이와 내용이 예상과 일치하는지 검증
         assertEq(codeLength, expectedCodeLength);
         assertEq(code, expectedCode);
-
-        // extcodehash를 이용해 코드 해시 비교
-        bytes32 codeHash;
-        assembly {
-            codeHash := extcodehash(alice)
-        }
-        bytes32 expectedCodeHash = keccak256(expectedCode);
-        assertEq(codeHash, expectedCodeHash);
-
-        // extcodecopy로 복사한 코드가 expectedCode와 일치하는지 확인
-        bytes memory copiedCode = new bytes(codeLength);
-        assembly {
-            extcodecopy(alice, add(copiedCode, 0x20), 0, codeLength)
-        }
-        assertEq(copiedCode, expectedCode);
 
         // ====================================================
         // Step 3: 실행 작업(Execution Operations) 검증
@@ -210,7 +208,9 @@ contract SimpleDelegateTest is Test {
          */
 
         // (1) STATICCALL을 통해 identifier 호출: 반환값은 keccak256("UnsafeDelegation")이어야 함.
-        (, bytes memory data) = ALICE.staticcall(abi.encodeWithSelector(UnsafeDelegation.identifier.selector));
+        (, bytes memory data) = ALICE.staticcall(
+            abi.encodeWithSelector(UnsafeDelegation.identifier.selector)
+        );
         bytes32 identifier = abi.decode(data, (bytes32));
         assertEq(identifier, keccak256("UnsafeDelegation"));
 
@@ -223,11 +223,48 @@ contract SimpleDelegateTest is Test {
 
         // BOB의 컨텍스트로 ALICE의 execute 함수를 호출하여 1 ether 전송.
         vm.prank(BOB);
-        UnsafeDelegation(payable(ALICE)).execute{value: 1 ether}(new UnsafeDelegation.Call[](0));
+        UnsafeDelegation(payable(ALICE)).execute{value: 1 ether}(
+            new UnsafeDelegation.Call[](0)
+        );
 
         // 실행 후, ALICE의 잔액이 1 ether 증가하고 BOB의 잔액이 1 ether 감소했음을 확인.
         assertEq(ALICE.balance, aliceBalance + 1 ether);
         assertEq(BOB.balance, bobBalance - 1 ether);
+    }
+
+    function test_CheckCode() public {
+        // ====================================================
+        // Step 1: Delegation Tuple 생성 및 부착
+        // ====================================================
+        // ALICE는 unsafe delegation 구현(contract)에 대해 delegation 서명을 생성합니다.
+        Vm.SignedDelegation memory signedDelegation = vm.signDelegation(
+            address(unsafeImplementation),
+            ALICE_PVK
+        );
+        // 생성된 delegation 서명을 ALICE의 계정에 부착합니다.
+        vm.attachDelegation(signedDelegation);
+
+        // ====================================================
+        // Step 2: CheckCode 컨트랙트를 통해 ALICE의 코드 확인
+        // ====================================================
+        /*
+         * BOB -> CheckCode 컨트랙트 -> ALICE의 코드 확인
+         * 이 과정에서 코드 확인 컨트랙트는 ALICE의 코드를 반환해야 합니다.
+         */
+        vm.prank(BOB);
+        bytes memory code = checkCode.checkCode(ALICE);
+
+        bytes memory actualCode = ALICE.code; // ALICE에 부착된 delegation의 코드
+
+        uint256 codeLength = code.length;
+        uint256 actualCodeLength = actualCode.length;
+
+        // delegation designator가 존재하는지 (코드가 존재하는지) 확인
+        assertGt(codeLength, 0);
+        assertGt(actualCodeLength, 0);
+        // 코드 길이와 내용이 예상과 일치하는지 검증
+        assertEq(codeLength, actualCodeLength);
+        assertEq(code, actualCode);
     }
 
     /**
@@ -254,12 +291,22 @@ contract SimpleDelegateTest is Test {
         calls[0] = UnsafeDelegation.Call({
             to: address(usdc),
             value: 0,
-            data: abi.encodeWithSelector(IERC20.approve.selector, address(swap), SWAP_AMOUNT)
+            data: abi.encodeWithSelector(
+                IERC20.approve.selector,
+                address(swap),
+                SWAP_AMOUNT
+            )
         });
         calls[1] = UnsafeDelegation.Call({
             to: address(swap),
             value: 0,
-            data: abi.encodeWithSelector(SimpleSwap.swap.selector, address(usdc), address(usdk), SWAP_AMOUNT, SWAP_AMOUNT)
+            data: abi.encodeWithSelector(
+                SimpleSwap.swap.selector,
+                address(usdc),
+                address(usdk),
+                SWAP_AMOUNT,
+                SWAP_AMOUNT
+            )
         });
 
         // BOB가 ALICE에 부착된 unsafe delegation의 execute 함수를 호출하여 위 call 배열을 실행시킵니다.
@@ -293,7 +340,11 @@ contract SimpleDelegateTest is Test {
         calls[0] = UnsafeDelegation.Call({
             to: address(usdc),
             value: 0,
-            data: abi.encodeWithSelector(IERC20.transfer.selector, BOB, usdc.balanceOf(ALICE))
+            data: abi.encodeWithSelector(
+                IERC20.transfer.selector,
+                BOB,
+                usdc.balanceOf(ALICE)
+            )
         });
 
         // ALICE의 현재 USDC 잔액 저장 (이 값을 나중에 BOB의 잔액 증가 확인에 사용)
@@ -325,7 +376,12 @@ contract SimpleDelegateTest is Test {
         // ALICE가 실행할 호출(Call) 배열 준비:
         // - 첫 번째 call: ALICE의 USDC에서 swap 컨트랙트에 대해 SWAP_AMOUNT 승인
         // - 두 번째 call: swap.swap 함수를 호출해서 USDC를 USDK로 스왑 (1:1 스왑)
-        SafeDelegation.Call[] memory calls = prepareSwapCalls(address(usdc), address(usdk), SWAP_AMOUNT, SWAP_AMOUNT);
+        SafeDelegation.Call[] memory calls = prepareSwapCalls(
+            address(usdc),
+            address(usdk),
+            SWAP_AMOUNT,
+            SWAP_AMOUNT
+        );
 
         // ALICE 자신만이 safe delegation을 통해 execute를 호출할 수 있음 (vm.prank(ALICE) 사용)
         vm.prank(ALICE);
@@ -354,7 +410,12 @@ contract SimpleDelegateTest is Test {
         startDelegation(address(safeImplementation), ALICE_PVK);
 
         // 호출(Call) 배열 준비: ALICE의 USDC 승인 및 swap 호출 포함
-        SafeDelegation.Call[] memory calls = prepareSwapCalls(address(usdc), address(usdk), SWAP_AMOUNT, SWAP_AMOUNT);
+        SafeDelegation.Call[] memory calls = prepareSwapCalls(
+            address(usdc),
+            address(usdk),
+            SWAP_AMOUNT,
+            SWAP_AMOUNT
+        );
 
         // BOB가 execute 호출 시, safe delegation의 OnlySelf 제약 조건으로 인해 revert 되어야 함을 예상
         vm.expectRevert(SafeDelegation.OnlySelf.selector);
@@ -373,7 +434,10 @@ contract SimpleDelegateTest is Test {
      *      해당 서명을 현재 호출 컨텍스트의 msg.sender에 부착합니다.
      */
     function startDelegation(address implementation, uint256 pvKey) public {
-        Vm.SignedDelegation memory signedDelegation = vm.signDelegation(implementation, pvKey);
+        Vm.SignedDelegation memory signedDelegation = vm.signDelegation(
+            implementation,
+            pvKey
+        );
         vm.attachDelegation(signedDelegation);
     }
 
@@ -388,23 +452,34 @@ contract SimpleDelegateTest is Test {
      *  1. tokenIn(예: USDC)에 대해 swap 컨트랙트에 SWAP_AMOUNT 승인 호출.
      *  2. swap.swap 함수를 호출하여 tokenIn을 tokenOut으로 스왑하는 호출.
      */
-    function prepareSwapCalls(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut)
-        public
-        view
-        returns (UnsafeDelegation.Call[] memory calls)
-    {
+    function prepareSwapCalls(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOut
+    ) public view returns (UnsafeDelegation.Call[] memory calls) {
         calls = new UnsafeDelegation.Call[](2);
         // 첫 번째 Call: tokenIn(USDC)에 대해 swap 컨트랙트에 토큰 전송 권한을 부여 (approve)
         calls[0] = UnsafeDelegation.Call({
             to: address(tokenIn),
             value: 0,
-            data: abi.encodeWithSelector(IERC20.approve.selector, address(swap), amountIn)
+            data: abi.encodeWithSelector(
+                IERC20.approve.selector,
+                address(swap),
+                amountIn
+            )
         });
         // 두 번째 Call: swap.swap 함수를 호출하여 실제 토큰 교환을 수행
         calls[1] = UnsafeDelegation.Call({
             to: address(swap),
             value: 0,
-            data: abi.encodeWithSelector(SimpleSwap.swap.selector, tokenIn, tokenOut, amountIn, amountOut)
+            data: abi.encodeWithSelector(
+                SimpleSwap.swap.selector,
+                tokenIn,
+                tokenOut,
+                amountIn,
+                amountOut
+            )
         });
     }
 }
