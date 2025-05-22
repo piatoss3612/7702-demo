@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.28;
 
-contract CheckCode {
+contract DelegateChecker {
     function checkCode(address target) public view returns (bytes memory code) {
         assembly {
             // Allocate memory for the code
@@ -15,5 +15,16 @@ contract CheckCode {
             // Copy code
             extcodecopy(target, add(code, 0x20), 0, size)
         }
+    }
+
+    function staticCall(
+        address target,
+        bytes memory data
+    ) public view returns (bytes memory) {
+        (bool success, bytes memory result) = target.staticcall(data);
+        if (!success) {
+            revert("Static call failed");
+        }
+        return result;
     }
 }

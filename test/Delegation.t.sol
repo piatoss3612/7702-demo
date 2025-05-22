@@ -7,7 +7,7 @@ import {MyERC20} from "src/MyERC20.sol";
 import {UnsafeDelegation} from "src/UnsafeDelegation.sol";
 import {SafeDelegation} from "src/SafeDelegation.sol";
 import {SimpleSwap} from "src/SimpleSwap.sol";
-import {CheckCode} from "src/CheckCode.sol";
+import {DelegateChecker} from "src/DelegateChecker.sol";
 
 /**
  * @title SimpleDelegateTest
@@ -38,7 +38,7 @@ contract SimpleDelegateTest is Test {
     // 테스트에서 사용할 컨트랙트 인스턴스들
     UnsafeDelegation public unsafeImplementation; // 누구나 호출할 수 있는 unsafe delegation 구현
     SafeDelegation public safeImplementation; // 오직 소유자 자신만 호출할 수 있는 safe delegation 구현
-    CheckCode public checkCode; // 코드 확인 컨트랙트
+    DelegateChecker public delegateChecker; // 코드 확인 컨트랙트
     SimpleSwap public swap; // 스왑 기능을 제공하는 컨트랙트
     MyERC20 public usdc; // 테스트용 USDC 토큰 (6자리 소수점)
     MyERC20 public usdk; // 테스트용 USDK 토큰 (6자리 소수점)
@@ -65,7 +65,7 @@ contract SimpleDelegateTest is Test {
         safeImplementation = new SafeDelegation();
 
         // 코드 확인 컨트랙트 배포
-        checkCode = new CheckCode();
+        delegateChecker = new DelegateChecker();
 
         // 스왑 컨트랙트 배포
         swap = new SimpleSwap();
@@ -232,7 +232,7 @@ contract SimpleDelegateTest is Test {
         assertEq(BOB.balance, bobBalance - 1 ether);
     }
 
-    function test_CheckCode() public {
+    function test_DelegateCheck() public {
         // ====================================================
         // Step 1: Delegation Tuple 생성 및 부착
         // ====================================================
@@ -252,7 +252,7 @@ contract SimpleDelegateTest is Test {
          * 이 과정에서 코드 확인 컨트랙트는 ALICE의 코드를 반환해야 합니다.
          */
         vm.prank(BOB);
-        bytes memory code = checkCode.checkCode(ALICE);
+        bytes memory code = delegateChecker.checkCode(ALICE);
 
         bytes memory actualCode = ALICE.code; // ALICE에 부착된 delegation의 코드
 
@@ -265,6 +265,28 @@ contract SimpleDelegateTest is Test {
         // 코드 길이와 내용이 예상과 일치하는지 검증
         assertEq(codeLength, actualCodeLength);
         assertEq(code, actualCode);
+
+        // ====================================================
+        // Step 3: 실행 작업(Execution Operations) 검증
+        // ====================================================
+        /*
+         * CALL, STATICCALL, DELEGATECALL, CALLCODE 등과 같은 실행 호출은 delegation designator가 가리키는
+         * 컨트랙트의 코드를 ALICE의 권한 컨텍스트에서 실행시켜야 합니다.
+         *
+         * 아래 검증 단계가 있습니다:
+         * 1. STATICCALL을 이용해 unsafe delegation의 identifier 함수를 호출하고 반환 값을 확인.
+         * 2. 다른 계정(BOB)이 ALICE의 delegation을 통해 execute 호출을 실행했을 때,
+         *    실제로 ALICE의 컨텍스트에서 실행되어 잔액 변화가 발생하는지 점검.
+         */
+
+        // (1) STATICCALL을 통해 identifier 호출: 반환값은 keccak256("UnsafeDelegation")이어야 함.
+        vm.prank(BOB);
+        bytes memory data = delegateChecker.staticCall(
+            ALICE,
+            abi.encodeWithSelector(UnsafeDelegation.identifier.selector)
+        );
+        bytes32 identifier = abi.decode(data, (bytes32));
+        assertEq(identifier, keccak256("UnsafeDelegation"));
     }
 
     /**
